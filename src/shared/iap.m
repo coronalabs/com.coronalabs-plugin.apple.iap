@@ -13,6 +13,7 @@ CORONA_EXPORT int luaopen_plugin_apple_iap( lua_State *L );
 
 static const char* kAppleIAP_ReceipEvent = "receiptRequest";
 static const char* kAppleIAP_TransactionEvent = "storeTransaction";
+static const char* kAppleIAP_PromotedPurchaseEvent = "promotedTransaction";
 static const char* kAppleIAP_LoadEvent = "productList";
 
 static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
@@ -26,6 +27,7 @@ static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
 
 @property (retain, nonatomic) NSMutableDictionary<NSString*, SKProduct*>* loadedProducts;
 @property (assign, nonatomic) CoronaLuaRef transactionListener;
+@property (assign, nonatomic) CoronaLuaRef promotedProductListener;
 @property (assign, nonatomic) lua_State* luaState;
 
 @end
@@ -41,6 +43,7 @@ static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
 		self.luaState = L;
 		self.loadedProducts = [[[NSMutableDictionary alloc] init] autorelease];
 		self.transactionListener = 0;
+        self.promotedProductListener = 0;
 	}
 	return self;
 }
@@ -86,7 +89,21 @@ static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
 }
 
 #if TARGET_OS_IPHONE
+//Return true to continue the transaction in your app.
+//Return false to defer or cancel the transaction.
+//If you return false, you can continue the transaction later by manually adding the SKPayment payment to the SKPaymentQueue queue.
+//https://developer.apple.com/documentation/storekit/skpaymenttransactionobserver/2877502-paymentqueue
 -(BOOL)paymentQueue:(SKPaymentQueue *)queue shouldAddStorePayment:(SKPayment *)payment forProduct:(SKProduct *)product {
+    if(self.promotedProductListener) {
+        lua_State *L = self.luaState;
+        
+        CoronaLuaNewEvent(L, kAppleIAP_PromotedPurchaseEvent);
+        lua_pushstring(L, [product.productIdentifier UTF8String]);
+        lua_setfield(L, -2, "productIdentifier");
+        
+        CoronaLuaDispatchEvent(L, self.promotedProductListener, 0);
+        return  NO;
+    }
 	return YES;
 }
 #endif
@@ -285,6 +302,7 @@ static int cleanupIAPs( lua_State *L )
 	AppleIAPTransactionObserver *observer = (AppleIAPTransactionObserver*)CoronaLuaToUserdata( L, 1 );
 	[observer stop];
 	CoronaLuaDeleteRef(L, observer.transactionListener);
+    CoronaLuaDeleteRef(L, observer.promotedProductListener);
 	return 0;
 }
 
@@ -630,6 +648,24 @@ static int appleIAP_purchase(lua_State *L)
 	return 0;
 }
 
+static int appleIAP_startPromotedPurchase(lua_State *L)
+{
+    AppleIAPTransactionObserver *observer = [AppleIAPTransactionObserver toobserver:L];
+    int nArg = 1;
+    
+    if(observer.promotedProductListener) {
+        CoronaLuaDeleteRef(L, observer.promotedProductListener);
+        observer.promotedProductListener = NULL;
+    }
+    
+    if(CoronaLuaIsListener(L, nArg, kAppleIAP_PromotedPurchaseEvent)) {
+        CoronaLuaRef listener = CoronaLuaNewRef(L, nArg);
+        observer.promotedProductListener = listener;
+    }
+    
+    return 0;
+}
+
 static int appleIAP_finishTransaction(lua_State *L)
 {
 	lua_getmetatable(L, 1);
@@ -756,6 +792,7 @@ CORONA_EXPORT int luaopen_plugin_apple_iap( lua_State *L )
 		{ "init", appleIAP_init },
 		{ "loadProducts", appleIAP_loadProducts },
 		{ "purchase", appleIAP_purchase },
+        { "startPromotedPurchase", appleIAP_startPromotedPurchase },
 		{ "finishTransaction", appleIAP_finishTransaction },
 		{ "restore", appleIAP_restoreCompletedTransactions },
 		

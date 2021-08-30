@@ -88,6 +88,26 @@ store.loadProducts(prodList, function(event)
     end
 end )
 
+-- If store.startPromotedPurchase is implemented, we have to handle purchase manually according to Apple documentation. Else plugin will work like before.
+-- https://developer.apple.com/documentation/storekit/skpaymenttransactionobserver/2877502-paymentqueue
+-- event will have event.productIdentifier if app is triggered with promoted product.
+local function promotedPurchaseListener(event)
+    local productIdentifier = tostring(event.productIdentifier)
+    if productIdentifier then
+        native.showAlert("Promote In-App", "Promote In-App detacted. Are you adult?", {"YES", "NO"}, function(e)
+            if ( e.action == "clicked" ) then
+                local i = e.index
+                if ( i == 1 ) then
+                    native.setActivityIndicator( true )
+                    store.purchase(productIdentifier)
+                end
+            end
+        end)
+    end
+end
+store.startPromotedPurchase(promotedPurchaseListener)
+
+
 
 local function onKey( event )
     if event.keyName == "buttonA" and event.phase == "up" then
