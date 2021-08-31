@@ -14,7 +14,7 @@ void pushProductTable(lua_State *L, SKProduct *product);
 
 static const char* kAppleIAP_ReceipEvent = "receiptRequest";
 static const char* kAppleIAP_TransactionEvent = "storeTransaction";
-static const char* kAppleIAP_PromotedPurchaseEvent = "promotedTransaction";
+static const char* kAppleIAP_AppStorePurchaseEvent = "appStorePurchase";
 static const char* kAppleIAP_LoadEvent = "productList";
 
 static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
@@ -90,16 +90,11 @@ static const char* kAppleIAP_PaymentMetatdata = "kApplePayment-2444635A037B";
 	}
 }
 
-#if TARGET_OS_IPHONE
-//Return true to continue the transaction in your app.
-//Return false to defer or cancel the transaction.
-//If you return false, you can continue the transaction later by manually adding the SKPayment payment to the SKPaymentQueue queue.
-//https://developer.apple.com/documentation/storekit/skpaymenttransactionobserver/2877502-paymentqueue
 -(BOOL)paymentQueue:(SKPaymentQueue *)queue shouldAddStorePayment:(SKPayment *)payment forProduct:(SKProduct *)product {
     if(self.deferredPurchasesListener) {
         lua_State *L = self.luaState;
         
-        CoronaLuaNewEvent(L, kAppleIAP_PromotedPurchaseEvent);
+        CoronaLuaNewEvent(L, kAppleIAP_AppStorePurchaseEvent);
 
         pushProductTable(L, product);
         lua_setfield(L, -2, "product");
@@ -112,7 +107,6 @@ static const char* kAppleIAP_PaymentMetatdata = "kApplePayment-2444635A037B";
     }
 	return YES;
 }
-#endif
 
 
 -(void)paymentQueue:(SKPaymentQueue *)queue removedTransactions:(NSArray<SKPaymentTransaction *> *)transactions {
@@ -359,7 +353,9 @@ static int appleIAP_init(lua_State *L)
 	if(CoronaLuaIsListener(L, nArg, kAppleIAP_TransactionEvent)) {
 		CoronaLuaRef listener = CoronaLuaNewRef(L, nArg);
 		observer.transactionListener = listener;
-		[[SKPaymentQueue defaultQueue] addTransactionObserver:observer];
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[[SKPaymentQueue defaultQueue] addTransactionObserver:observer];
+		});
 		
 		dispatch_async(dispatch_get_main_queue(), ^{
 			CoronaLuaNewEvent(L, "init");
@@ -668,7 +664,7 @@ static int appleIAP_deferPurchases(lua_State *L)
         observer.deferredPurchasesListener = NULL;
     }
     
-    if(CoronaLuaIsListener(L, nArg, kAppleIAP_PromotedPurchaseEvent)) {
+    if(CoronaLuaIsListener(L, nArg, kAppleIAP_AppStorePurchaseEvent)) {
         CoronaLuaRef listener = CoronaLuaNewRef(L, nArg);
         observer.deferredPurchasesListener = listener;
     }
@@ -884,8 +880,8 @@ CORONA_EXPORT int luaopen_plugin_apple_iap( lua_State *L )
 		{ "finishTransaction", appleIAP_finishTransaction },
 		{ "restore", appleIAP_restoreCompletedTransactions },
 
-        { "deferPurchases", appleIAP_deferPurchases },
-        { "continueDeferred", appleIAP_continueDeferred },
+		{ "deferStorePurchases", appleIAP_deferPurchases },
+		{ "proceedToPayment", appleIAP_continueDeferred },
 
 		{ "receiptRawData", appleIAP_rawReceiptData },
 		{ "receiptBase64Data", appleIAP_base64ReceiptData },
