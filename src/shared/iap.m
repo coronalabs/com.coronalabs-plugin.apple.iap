@@ -10,6 +10,7 @@
 
 
 CORONA_EXPORT int luaopen_plugin_apple_iap( lua_State *L );
+void pushProductTable(lua_State *L, SKProduct *product);
 
 static const char* kAppleIAP_ReceipEvent = "receiptRequest";
 static const char* kAppleIAP_TransactionEvent = "storeTransaction";
@@ -17,6 +18,7 @@ static const char* kAppleIAP_PromotedPurchaseEvent = "promotedTransaction";
 static const char* kAppleIAP_LoadEvent = "productList";
 
 static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
+static const char* kAppleIAP_PaymentMetatdata = "kApplePayment-2444635A037B";
 
 @interface AppleIAPTransactionObserver : NSObject <SKPaymentTransactionObserver>
 
@@ -27,7 +29,7 @@ static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
 
 @property (retain, nonatomic) NSMutableDictionary<NSString*, SKProduct*>* loadedProducts;
 @property (assign, nonatomic) CoronaLuaRef transactionListener;
-@property (assign, nonatomic) CoronaLuaRef promotedProductListener;
+@property (assign, nonatomic) CoronaLuaRef deferredPurchasesListener;
 @property (assign, nonatomic) lua_State* luaState;
 
 @end
@@ -43,7 +45,7 @@ static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
 		self.luaState = L;
 		self.loadedProducts = [[[NSMutableDictionary alloc] init] autorelease];
 		self.transactionListener = 0;
-        self.promotedProductListener = 0;
+        self.deferredPurchasesListener = 0;
 	}
 	return self;
 }
@@ -94,14 +96,18 @@ static const char* kAppleIAP_TransactionMetatdata = "kAppleIAP-2444635A037B";
 //If you return false, you can continue the transaction later by manually adding the SKPayment payment to the SKPaymentQueue queue.
 //https://developer.apple.com/documentation/storekit/skpaymenttransactionobserver/2877502-paymentqueue
 -(BOOL)paymentQueue:(SKPaymentQueue *)queue shouldAddStorePayment:(SKPayment *)payment forProduct:(SKProduct *)product {
-    if(self.promotedProductListener) {
+    if(self.deferredPurchasesListener) {
         lua_State *L = self.luaState;
         
         CoronaLuaNewEvent(L, kAppleIAP_PromotedPurchaseEvent);
-        lua_pushstring(L, [product.productIdentifier UTF8String]);
-        lua_setfield(L, -2, "productIdentifier");
+
+        pushProductTable(L, product);
+        lua_setfield(L, -2, "product");
         
-        CoronaLuaDispatchEvent(L, self.promotedProductListener, 0);
+        CoronaLuaPushUserdata(L, [payment retain], kAppleIAP_PaymentMetatdata);
+        lua_setfield(L, -2, "payment");
+        
+        CoronaLuaDispatchEvent(L, self.deferredPurchasesListener, 0);
         return  NO;
     }
 	return YES;
@@ -302,7 +308,7 @@ static int cleanupIAPs( lua_State *L )
 	AppleIAPTransactionObserver *observer = (AppleIAPTransactionObserver*)CoronaLuaToUserdata( L, 1 );
 	[observer stop];
 	CoronaLuaDeleteRef(L, observer.transactionListener);
-    CoronaLuaDeleteRef(L, observer.promotedProductListener);
+    CoronaLuaDeleteRef(L, observer.deferredPurchasesListener);
 	return 0;
 }
 
@@ -388,6 +394,117 @@ static int appleIAP_init(lua_State *L)
 	return self;
 }
 
+void pushProductTable(lua_State *L, SKProduct *product) {
+	lua_createtable(L, 0, 6);
+
+	lua_pushstring(L, [product.productIdentifier UTF8String]);
+	lua_setfield(L, -2, "productIdentifier");
+	
+	lua_pushstring(L, [product.localizedTitle UTF8String]);
+	lua_setfield(L, -2, "title");
+	
+	lua_pushstring(L, [product.localizedDescription UTF8String]);
+	lua_setfield(L, -2, "description");
+	
+	lua_pushnumber(L, [product.price doubleValue]);
+	lua_setfield(L, -2, "price");
+	
+	if (@available(iOS 11.2, macOS 10.13.2, tvOS 11.2, *)){
+		if(product.subscriptionPeriod) {
+			lua_pushinteger(L, [product.subscriptionPeriod numberOfUnits] );
+			lua_setfield(L, -2, "subscriptionPeriodNumberOfUnits");
+			
+			switch ([product.subscriptionPeriod unit]) {
+				case SKProductPeriodUnitDay:
+					lua_pushliteral(L, "day");
+					break;
+				case SKProductPeriodUnitWeek:
+					lua_pushliteral(L, "week");
+					break;
+				case SKProductPeriodUnitMonth:
+					lua_pushliteral(L, "month");
+					break;
+				case SKProductPeriodUnitYear:
+					lua_pushliteral(L, "year");
+					break;
+			}
+			lua_setfield(L, -2, "subscriptionPeriodUnit");
+		}
+		
+		if(product.introductoryPrice) {
+			lua_newtable(L);
+			{
+				lua_pushnumber(L, [product.introductoryPrice.price doubleValue]);
+				lua_setfield(L, -2, "price");
+				
+				NSNumberFormatter *numberFormatter = [[NSNumberFormatter alloc] init];
+				[numberFormatter setFormatterBehavior:NSNumberFormatterBehavior10_4];
+				[numberFormatter setNumberStyle:NSNumberFormatterCurrencyStyle];
+				[numberFormatter setLocale:product.introductoryPrice.priceLocale];
+				lua_pushstring(L, [[numberFormatter stringFromNumber:product.introductoryPrice.price] UTF8String]);
+				lua_setfield(L, -2, "localizedPrice");
+				[numberFormatter release];
+				
+				lua_pushstring(L, [[[product.introductoryPrice priceLocale] objectForKey:NSLocaleIdentifier] UTF8String]);
+				lua_setfield(L, -2, "priceLocale");
+				
+				lua_pushstring(L, [[[product.introductoryPrice priceLocale] objectForKey:NSLocaleCurrencyCode] UTF8String]);
+				lua_setfield(L, -2, "priceCurrencyCode");
+				
+				lua_pushinteger(L, [product.introductoryPrice.subscriptionPeriod numberOfUnits] );
+				lua_setfield(L, -2, "subscriptionPeriodNumberOfUnits");
+				
+				switch ([product.introductoryPrice.subscriptionPeriod unit]) {
+					case SKProductPeriodUnitDay:
+						lua_pushliteral(L, "day");
+						break;
+					case SKProductPeriodUnitWeek:
+						lua_pushliteral(L, "week");
+						break;
+					case SKProductPeriodUnitMonth:
+						lua_pushliteral(L, "month");
+						break;
+					case SKProductPeriodUnitYear:
+						lua_pushliteral(L, "year");
+						break;
+				}
+				lua_setfield(L, -2, "subscriptionPeriodUnit");
+				
+				lua_pushinteger(L, [product.introductoryPrice numberOfPeriods] );
+				lua_setfield(L, -2, "numberOfPeriods");
+				
+				switch (product.introductoryPrice.paymentMode) {
+					case SKProductDiscountPaymentModePayAsYouGo:
+						lua_pushliteral(L, "PayAsYouGo");
+						break;
+					case SKProductDiscountPaymentModePayUpFront:
+						lua_pushliteral(L, "PayUpFront");
+						break;
+					case SKProductDiscountPaymentModeFreeTrial:
+						lua_pushliteral(L, "FreeTrial");
+						break;
+				}
+				lua_setfield(L, -2, "paymentMode");
+			}
+			lua_setfield(L, -2, "introductoryPrice");
+		}
+	}
+	
+	NSNumberFormatter *numberFormatter = [[NSNumberFormatter alloc] init];
+	[numberFormatter setFormatterBehavior:NSNumberFormatterBehavior10_4];
+	[numberFormatter setNumberStyle:NSNumberFormatterCurrencyStyle];
+	[numberFormatter setLocale:product.priceLocale];
+	lua_pushstring(L, [[numberFormatter stringFromNumber:product.price] UTF8String]);
+	lua_setfield(L, -2, "localizedPrice");
+	[numberFormatter release];
+	
+	lua_pushstring(L, [[[product priceLocale] objectForKey:NSLocaleIdentifier] UTF8String]);
+	lua_setfield(L, -2, "priceLocale");
+	
+	lua_pushstring(L, [[[product priceLocale] objectForKey:NSLocaleCurrencyCode] UTF8String]);
+	lua_setfield(L, -2, "priceCurrencyCode");
+}
+
 - (void)productsRequest:(nonnull SKProductsRequest *)request didReceiveResponse:(nonnull SKProductsResponse *)response {
 	dispatch_async(dispatch_get_main_queue(), ^{
 		lua_State *L = self.observer.luaState;
@@ -399,115 +516,8 @@ static int appleIAP_init(lua_State *L)
 		for (SKProduct *product in response.products) {
 			
 			[self.observer.loadedProducts setObject:product forKey:product.productIdentifier];
-			
-			lua_createtable(L, 0, 6);
-			
-			lua_pushstring(L, [product.productIdentifier UTF8String]);
-			lua_setfield(L, -2, "productIdentifier");
-			
-			lua_pushstring(L, [product.localizedTitle UTF8String]);
-			lua_setfield(L, -2, "title");
-			
-			lua_pushstring(L, [product.localizedDescription UTF8String]);
-			lua_setfield(L, -2, "description");
-			
-			lua_pushnumber(L, [product.price doubleValue]);
-			lua_setfield(L, -2, "price");
-			
-			if (@available(iOS 11.2, macOS 10.13.2, tvOS 11.2, *)){
-				if(product.subscriptionPeriod) {
-					lua_pushinteger(L, [product.subscriptionPeriod numberOfUnits] );
-					lua_setfield(L, -2, "subscriptionPeriodNumberOfUnits");
-
-					switch ([product.subscriptionPeriod unit]) {
-						case SKProductPeriodUnitDay:
-							lua_pushliteral(L, "day");
-							break;
-						case SKProductPeriodUnitWeek:
-							lua_pushliteral(L, "week");
-							break;
-						case SKProductPeriodUnitMonth:
-							lua_pushliteral(L, "month");
-							break;
-						case SKProductPeriodUnitYear:
-							lua_pushliteral(L, "year");
-							break;
-					}
-					lua_setfield(L, -2, "subscriptionPeriodUnit");
-				}
-
-				if(product.introductoryPrice) {
-					lua_newtable(L);
-					{
-						lua_pushnumber(L, [product.introductoryPrice.price doubleValue]);
-						lua_setfield(L, -2, "price");
 						
-						NSNumberFormatter *numberFormatter = [[NSNumberFormatter alloc] init];
-						[numberFormatter setFormatterBehavior:NSNumberFormatterBehavior10_4];
-						[numberFormatter setNumberStyle:NSNumberFormatterCurrencyStyle];
-						[numberFormatter setLocale:product.introductoryPrice.priceLocale];
-						lua_pushstring(L, [[numberFormatter stringFromNumber:product.introductoryPrice.price] UTF8String]);
-						lua_setfield(L, -2, "localizedPrice");
-						[numberFormatter release];
-						
-						lua_pushstring(L, [[[product.introductoryPrice priceLocale] objectForKey:NSLocaleIdentifier] UTF8String]);
-						lua_setfield(L, -2, "priceLocale");
-						
-						lua_pushstring(L, [[[product.introductoryPrice priceLocale] objectForKey:NSLocaleCurrencyCode] UTF8String]);
-						lua_setfield(L, -2, "priceCurrencyCode");
-
-						lua_pushinteger(L, [product.introductoryPrice.subscriptionPeriod numberOfUnits] );
-						lua_setfield(L, -2, "subscriptionPeriodNumberOfUnits");
-						
-						switch ([product.introductoryPrice.subscriptionPeriod unit]) {
-							case SKProductPeriodUnitDay:
-								lua_pushliteral(L, "day");
-								break;
-							case SKProductPeriodUnitWeek:
-								lua_pushliteral(L, "week");
-								break;
-							case SKProductPeriodUnitMonth:
-								lua_pushliteral(L, "month");
-								break;
-							case SKProductPeriodUnitYear:
-								lua_pushliteral(L, "year");
-								break;
-						}
-						lua_setfield(L, -2, "subscriptionPeriodUnit");
-						
-						lua_pushinteger(L, [product.introductoryPrice numberOfPeriods] );
-						lua_setfield(L, -2, "numberOfPeriods");
-
-						switch (product.introductoryPrice.paymentMode) {
-							case SKProductDiscountPaymentModePayAsYouGo:
-								lua_pushliteral(L, "PayAsYouGo");
-								break;
-							case SKProductDiscountPaymentModePayUpFront:
-								lua_pushliteral(L, "PayUpFront");
-								break;
-							case SKProductDiscountPaymentModeFreeTrial:
-								lua_pushliteral(L, "FreeTrial");
-								break;
-						}
-						lua_setfield(L, -2, "paymentMode");
-					}
-					lua_setfield(L, -2, "introductoryPrice");
-				}
-			}
-			
-			NSNumberFormatter *numberFormatter = [[NSNumberFormatter alloc] init];
-			[numberFormatter setFormatterBehavior:NSNumberFormatterBehavior10_4];
-			[numberFormatter setNumberStyle:NSNumberFormatterCurrencyStyle];
-			[numberFormatter setLocale:product.priceLocale];
-			lua_pushstring(L, [[numberFormatter stringFromNumber:product.price] UTF8String]);
-			lua_setfield(L, -2, "localizedPrice");
-			[numberFormatter release];
-			
-			lua_pushstring(L, [[[product priceLocale] objectForKey:NSLocaleIdentifier] UTF8String]);
-			lua_setfield(L, -2, "priceLocale");
-			
-			lua_pushstring(L, [[[product priceLocale] objectForKey:NSLocaleCurrencyCode] UTF8String]);
-			lua_setfield(L, -2, "priceCurrencyCode");
+			pushProductTable(L, product);
 
 			lua_rawseti(L, -2, i++);
 		}
@@ -648,22 +658,39 @@ static int appleIAP_purchase(lua_State *L)
 	return 0;
 }
 
-static int appleIAP_startPromotedPurchase(lua_State *L)
+static int appleIAP_deferPurchases(lua_State *L)
 {
     AppleIAPTransactionObserver *observer = [AppleIAPTransactionObserver toobserver:L];
     int nArg = 1;
     
-    if(observer.promotedProductListener) {
-        CoronaLuaDeleteRef(L, observer.promotedProductListener);
-        observer.promotedProductListener = NULL;
+    if(observer.deferredPurchasesListener) {
+        CoronaLuaDeleteRef(L, observer.deferredPurchasesListener);
+        observer.deferredPurchasesListener = NULL;
     }
     
     if(CoronaLuaIsListener(L, nArg, kAppleIAP_PromotedPurchaseEvent)) {
         CoronaLuaRef listener = CoronaLuaNewRef(L, nArg);
-        observer.promotedProductListener = listener;
+        observer.deferredPurchasesListener = listener;
     }
     
     return 0;
+}
+
+static int appleIAP_continueDeferred(lua_State *L)
+{
+	lua_getmetatable(L, 1);
+	lua_getfield(L, LUA_REGISTRYINDEX, kAppleIAP_PaymentMetatdata);
+	bool isPayment = lua_rawequal(L, -1, -2);
+	lua_pop(L, 2);
+	SKPayment* payment = NULL;
+	if(isPayment) {
+		payment = (SKPayment*)CoronaLuaToUserdata(L, 1);
+	}
+	if(payment) {
+		[[SKPaymentQueue defaultQueue] addPayment:payment];
+	}
+	lua_pushboolean(L, payment!=NULL);
+    return 1;
 }
 
 static int appleIAP_finishTransaction(lua_State *L)
@@ -778,6 +805,68 @@ static int appleIAP_transactionGC(lua_State *L) {
 	return 0;
 }
 
+
+static int appleIAP_PaymentIndex(lua_State *L) {
+	SKPayment *payment = (SKPayment*)CoronaLuaCheckUserdata( L, 1, kAppleIAP_PaymentMetatdata );
+	if(!payment)
+		return 0;
+	
+	const char *key = luaL_checkstring( L, 2 );
+	int nRet = 1;
+
+	if (0 == strcmp( "type", key )) {
+		lua_pushliteral(L, "payment");
+	} else if ( 0 == strcmp( "productIdentifier", key ) ) {
+		lua_pushstring( L, [[payment productIdentifier] UTF8String] );
+	} else if ( 0 == strcmp( "requestData", key ) ) {
+		lua_pushstring( L, [[[payment requestData] base64EncodedStringWithOptions:0] UTF8String]);
+	} else if ( 0 == strcmp( "quantity", key ) ) {
+		lua_pushinteger(L, [payment quantity]);
+	} else if ( 0 == strcmp( "applicationUsername", key ) ) {
+		lua_pushstring(L, [[payment applicationUsername] UTF8String]);
+	} else if ( 0 == strcmp( "simulatesAskToBuyInSandbox", key ) ) {
+		if (@available(iOS 12.2, macOS 10.14.4, tvOS 12.2, *)) {
+			lua_pushboolean(L, [payment simulatesAskToBuyInSandbox]);
+		} else {
+			lua_pushnil(L);
+		}
+	} else if ( 0 == strcmp( "paymentDiscount", key ) ) {
+		if (@available(iOS 12.2, macOS 10.14.4, tvOS 12.2, *)) {
+			SKPaymentDiscount *discount = [payment paymentDiscount];
+			lua_createtable(L, 0, 5);
+			
+			lua_pushstring(L, [[discount identifier] UTF8String]);
+			lua_setfield(L, -2, "identifier");
+
+			lua_pushstring(L, [[discount keyIdentifier] UTF8String]);
+			lua_setfield(L, -2, "keyIdentifier");
+			
+			lua_pushstring(L, [[[discount nonce] UUIDString] UTF8String]);
+			lua_setfield(L, -2, "nonce");
+			
+			lua_pushstring(L, [[discount signature] UTF8String]);
+			lua_setfield(L, -2, "signature");
+
+			lua_pushinteger(L, [[discount timestamp] longValue]);
+			lua_setfield(L, -2, "timestamp");
+
+		} else {
+			lua_pushnil(L);
+		}
+	} else {
+		nRet = 0;
+	}
+	
+	return nRet;
+}
+
+static int appleIAP_PaymentGC(lua_State *L) {
+	SKPayment* payment = (SKPayment*)CoronaLuaCheckUserdata(L, 1, kAppleIAP_PaymentMetatdata);
+	[payment release];
+	return 0;
+}
+
+
 #ifdef TARGET_OS_OSX
 static int apple_IAPSimulatorDummy(lua_State *L) {
 	printf("WARNING, Apple IAP Plugin won't work in Simulator\n");
@@ -792,10 +881,12 @@ CORONA_EXPORT int luaopen_plugin_apple_iap( lua_State *L )
 		{ "init", appleIAP_init },
 		{ "loadProducts", appleIAP_loadProducts },
 		{ "purchase", appleIAP_purchase },
-        { "startPromotedPurchase", appleIAP_startPromotedPurchase },
 		{ "finishTransaction", appleIAP_finishTransaction },
 		{ "restore", appleIAP_restoreCompletedTransactions },
-		
+
+        { "deferPurchases", appleIAP_deferPurchases },
+        { "continueDeferred", appleIAP_continueDeferred },
+
 		{ "receiptRawData", appleIAP_rawReceiptData },
 		{ "receiptBase64Data", appleIAP_base64ReceiptData },
 		{ "receiptDecrypted", appleIAP_decryptedReceipt },
@@ -862,6 +953,15 @@ CORONA_EXPORT int luaopen_plugin_apple_iap( lua_State *L )
 		{ NULL, NULL }
 	};
 	CoronaLuaInitializeMetatable( L, kAppleIAP_TransactionMetatdata, kTransactionVTable );
+	
+	const luaL_Reg kPaymentVTable[] =
+	{
+		{ "__index", appleIAP_PaymentIndex },
+		{"__gc", appleIAP_PaymentGC },
+		
+		{ NULL, NULL }
+	};
+	CoronaLuaInitializeMetatable( L, kAppleIAP_PaymentMetatdata, kPaymentVTable );
 
 	
 	const char* kMetatableName = "AppleIAP-FF02A024808F";
